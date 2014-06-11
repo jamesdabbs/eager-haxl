@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections, OverloadedStrings, StandaloneDeriving #-}
+{-# LANGUAGE TupleSections, OverloadedStrings, StandaloneDeriving, FlexibleInstances #-}
 module Handler.Home where
 
 import Import
@@ -54,7 +54,7 @@ data UserReq a where
   GetNameById :: Id -> UserReq Name
   deriving (Typeable)
 
-type Id = Int
+type Id = Int64
 type Name = String
 
 deriving instance Eq (UserReq a)
@@ -63,7 +63,10 @@ instance Hashable (UserReq a) where
    hashWithSalt s (GetNameById a) = hashWithSalt s (1::Int, a)
 
 instance StateKey UserReq where
-  data State UserReq = UserState {}
+  data State UserReq = UserState
+    { userStateHandler  :: Handler [UserId] -> IO [UserId]
+    , userStateHandler2 :: Handler [Entity Uname]  -> IO [Entity Uname]
+    }
 
 instance DataSourceName UserReq where
   dataSourceName _ = "UserDataSource"
@@ -73,9 +76,10 @@ instance Show1 UserReq where show1 = show
 
 type Haxl = GenHaxl ()
 
-sql a = do
-  putStrLn a
-  return []
+dekey (Key (PersistInt64 n)) = n
+dekey _ = error "Can't dekey"
+
+rekey = Key . PersistInt64
 
 -- Here's where we veer off the beaten path a little
 instance DataSource () UserReq where
@@ -84,24 +88,33 @@ instance DataSource () UserReq where
     unless (null allIdVars) $ do
 
       -- Fetch all the IDs.
-      ids <- sql $ "select id from ids"
+      ids <- runHandler $ runDB $ selectKeysList ([] :: [Filter User]) []
 
       -- Store the results.
-      mapM_ (\m -> putResult m (Right ids)) allIdVars
+      mapM_ (\m -> putResult m (Right . map dekey $ ids)) allIdVars
 
     unless (null ids) $ do
 
       -- Fetch all the names.
-      names <- sql $ unwords
-        [ "select name from names where"
-        , intercalate " or " $ map ("id = " ++) idStrings
-        , "order by find_in_set(id, '" ++ intercalate "," idStrings ++ "')"
-        ]
+      users <- runHandler2 $ runDB $ selectList [UnameUserId <-. (map rekey ids)] []
+      let names = map (unameName . entityVal) users
+      -- names <- sql $ unwords
+      --   [ "select name from names where"
+      --   , intercalate " or " $ map ("id = " ++) idStrings
+      --   , "order by find_in_set(id, '" ++ intercalate "," idStrings ++ "')"
+      --   ]
 
       -- Store the results.
-      mapM_ (\ (m, res) -> putResult m (Right res)) (zip vars names)
+      mapM_ (\ (m, res) -> putResult m (Right res)) (zip vars (map show names))
 
     where
+    runHandler = userStateHandler _state
+    runHandler2 = userStateHandler2 _state
+
+    sql a = do
+      putStrLn $ "~~~~~~~   " ++ a
+      return [1..9]
+
     allIdVars :: [ResultVar [Id]]
     allIdVars = mapMaybe
       (\bf -> case bf of
@@ -138,8 +151,11 @@ getAllUsernames = do
 
 getGoodR :: Handler Value
 getGoodR = do
+  runH <- handlerToIO
+  runH2 <- handlerToIO
+
   liftIO $ do
-    let stateStore = stateSet UserState{} stateEmpty
+    let stateStore = stateSet UserState{ userStateHandler = runH, userStateHandler2 = runH2 } stateEmpty
     env0 <- initEnv stateStore ()
     names <- runHaxl env0 getAllUsernames
     return ()
