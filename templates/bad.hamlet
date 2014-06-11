@@ -1,0 +1,2 @@
+$forall (Entity _id _) <- users
+  ^{usernameWidget _id}
