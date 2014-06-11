@@ -1,0 +1,2 @@
+$forall (Entity _ uname) <- names
+  #{unameName uname}

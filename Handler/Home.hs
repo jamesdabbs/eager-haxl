@@ -12,7 +12,6 @@ import Data.Typeable
 import Haxl.Core
 
 import Control.Monad (unless)
-import Data.List (intercalate)
 import Data.Maybe (mapMaybe)
 import Data.Traversable (for)
 
@@ -51,16 +50,22 @@ getBadR = do
 -- This setup cribbed directly from the README: https://github.com/facebook/Haxl/blob/master/example/sql/readme.md
 data UserReq a where
   GetAllIds   :: UserReq [Id]
-  GetNameById :: Id -> UserReq Name
+  GetUnameById :: Id -> UserReq Name
   deriving (Typeable)
 
-type Id = Int64
-type Name = String
+-- i_have_no_idea_what_im_doing.jpg
+deriving instance Typeable1 Entity
+deriving instance Typeable2 KeyBackend
+
+dekey (Key (PersistInt64 n)) = n
+
+type Id = UserId
+type Name = Entity Uname
 
 deriving instance Eq (UserReq a)
 instance Hashable (UserReq a) where
-   hashWithSalt s GetAllIds       = hashWithSalt s (0::Int)
-   hashWithSalt s (GetNameById a) = hashWithSalt s (1::Int, a)
+   hashWithSalt s GetAllIds        = hashWithSalt s (0::Int)
+   hashWithSalt s (GetUnameById a) = hashWithSalt s (1::Int, dekey a)
 
 instance StateKey UserReq where
   data State UserReq = UserState
@@ -76,11 +81,6 @@ instance Show1 UserReq where show1 = show
 
 type Haxl = GenHaxl ()
 
-dekey (Key (PersistInt64 n)) = n
-dekey _ = error "Can't dekey"
-
-rekey = Key . PersistInt64
-
 -- Here's where we veer off the beaten path a little
 instance DataSource () UserReq where
   fetch _state _flags _userEnv blockedFetches = SyncFetch $ do
@@ -91,29 +91,19 @@ instance DataSource () UserReq where
       ids <- runHandler $ runDB $ selectKeysList ([] :: [Filter User]) []
 
       -- Store the results.
-      mapM_ (\m -> putResult m (Right . map dekey $ ids)) allIdVars
+      mapM_ (\m -> putResult m (Right ids)) allIdVars
 
     unless (null ids) $ do
 
       -- Fetch all the names.
-      users <- runHandler2 $ runDB $ selectList [UnameUserId <-. (map rekey ids)] []
-      let names = map (unameName . entityVal) users
-      -- names <- sql $ unwords
-      --   [ "select name from names where"
-      --   , intercalate " or " $ map ("id = " ++) idStrings
-      --   , "order by find_in_set(id, '" ++ intercalate "," idStrings ++ "')"
-      --   ]
+      users <- runHandler2 $ runDB $ selectList [UnameUserId <-. ids] []
 
       -- Store the results.
-      mapM_ (\ (m, res) -> putResult m (Right res)) (zip vars (map show names))
+      mapM_ (\ (m, res) -> putResult m (Right res)) (zip vars users)
 
     where
     runHandler = userStateHandler _state
     runHandler2 = userStateHandler2 _state
-
-    sql a = do
-      putStrLn $ "~~~~~~~   " ++ a
-      return [1..9]
 
     allIdVars :: [ResultVar [Id]]
     allIdVars = mapMaybe
@@ -121,9 +111,6 @@ instance DataSource () UserReq where
         BlockedFetch GetAllIds m -> Just m
         _ -> Nothing)
       blockedFetches
-
-    idStrings :: [String]
-    idStrings = map show ids
 
     ids :: [Id]
     vars :: [ResultVar Name]
@@ -133,30 +120,29 @@ instance DataSource () UserReq where
       :: BlockedFetch UserReq
       -> [(Id, ResultVar Name)]
       -> [(Id, ResultVar Name)]
-    go (BlockedFetch (GetNameById userId) m) acc = (userId, m) : acc
+    go (BlockedFetch (GetUnameById userId) m) acc = (userId, m) : acc
     go _ acc = acc
 
 -- And bring it on home
 getAllUserIds :: Haxl [Id]
 getAllUserIds = dataFetch GetAllIds
 
-getUsernameById :: Id -> Haxl Name
-getUsernameById userId = dataFetch (GetNameById userId)
+getUnameById :: Id -> Haxl (Entity Uname)
+getUnameById userId = dataFetch (GetUnameById userId)
 
-getAllUsernames :: Haxl [Name]
+getAllUsernames :: Haxl [Entity Uname]
 getAllUsernames = do
   userIds <- getAllUserIds       -- Round 1
   for userIds $ \userId -> do    -- Round 2
-    getUsernameById userId
+    getUnameById userId
 
-getGoodR :: Handler Value
+getGoodR :: Handler Html
 getGoodR = do
   runH <- handlerToIO
   runH2 <- handlerToIO
 
-  liftIO $ do
+  names <- liftIO $ do
     let stateStore = stateSet UserState{ userStateHandler = runH, userStateHandler2 = runH2 } stateEmpty
     env0 <- initEnv stateStore ()
-    names <- runHaxl env0 getAllUsernames
-    return ()
-  error "I hope that was what you wanted"
+    runHaxl env0 getAllUsernames
+  defaultLayout $(widgetFile "good")
